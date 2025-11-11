@@ -7,7 +7,7 @@ A full-stack web application that visualizes live air traffic from around the wo
 **[https://flight-tracker-c2817.web.app/](https://flight-tracker-c2817.web.app/)** 
 
 ### 📸 Demo Screenshot
-![Project Screenshot Placeholder](![alt text](image.png))
+![alt text](image-1.png)
 
 
 ---
