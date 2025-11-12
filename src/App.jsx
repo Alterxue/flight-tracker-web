@@ -4,7 +4,8 @@ import 'mapbox-gl/dist/mapbox-gl.css';
 import './App.css';
 import axios from 'axios'
 mapboxgl.accessToken = import.meta.env.VITE_MAPBOX_TOKEN;
-const function_url = "https://getliveflights-m7umd3azqq-uc.a.run.app";
+const function_url = "https://us-central1-flight-tracker-c2817.cloudfunctions.net/getLiveFlights";
+const search_function_url = "https://us-central1-flight-tracker-c2817.cloudfunctions.net/searchFlightByCallsign";
 
 // Airline ICAO code mapping (Common airlines)
 const airlineMapping = {
@@ -63,6 +64,9 @@ function App(){
     features: []
   });
   const [filterText, setFilterText] = useState('');
+  const [searchCallsign, setSearchCallsign] = useState('');
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState('');
   
   // Apply filter to map layer - supports both airline code and airline name
   const applyFilter = useCallback((filterValue) => {
@@ -327,59 +331,264 @@ function App(){
     }
   },[flightGeoJson]);
 
+  // Search flight by callsign
+  const searchFlightByCallsign = useCallback(async (callsign) => {
+    if (!callsign || callsign.trim() === '') {
+      setSearchError('Please enter a flight number');
+      return;
+    }
+    
+    setSearchLoading(true);
+    setSearchError('');
+    
+    try {
+      const response = await axios.get(search_function_url, {
+        params: { callsign: callsign.trim() }
+      });
+      
+      const flightData = response.data.states || [];
+      
+      if (flightData.length === 0) {
+        setSearchError(`Flight ${callsign} not found. It may not be airborne or the callsign is incorrect.`);
+        setSearchLoading(false);
+        return;
+      }
+      
+      // Get the first matching flight
+      const flight = flightData[0];
+      const longitude = flight[5];
+      const latitude = flight[6];
+      
+      if (!longitude || !latitude) {
+        setSearchError('Flight found but location data unavailable.');
+        setSearchLoading(false);
+        return;
+      }
+      
+      // Fly to the flight location
+      map.current.flyTo({
+        center: [longitude, latitude],
+        zoom: 8,
+        duration: 2000
+      });
+      
+      // Add the searched flight to the map
+      const searchedFeature = {
+        type: 'Feature',
+        geometry: {
+          type: 'Point',
+          coordinates: [longitude, latitude]
+        },
+        properties: {
+          icao24: flight[0],
+          callsign: flight[1] ? flight[1].trim() : 'N/A',
+          origin_country: flight[2] || 'Unknown',
+          time_position: flight[3],
+          last_contact: flight[4],
+          longitude: longitude,
+          latitude: latitude,
+          baro_altitude: flight[7],
+          on_ground: flight[8],
+          velocity: flight[9],
+          true_track: flight[10] || 0,
+          vertical_rate: flight[11],
+          geo_altitude: flight[13]
+        }
+      };
+      
+      // Update the GeoJSON to include this flight
+      setFlightGeoJson(prevData => ({
+        type: 'FeatureCollection',
+        features: [...prevData.features.filter(f => 
+          f.properties.callsign !== searchedFeature.properties.callsign
+        ), searchedFeature]
+      }));
+      
+      // Show popup after a short delay
+      setTimeout(() => {
+        const callsignStr = searchedFeature.properties.callsign || 'N/A';
+        const icao24 = searchedFeature.properties.icao24 || 'Unknown';
+        const origin_country = searchedFeature.properties.origin_country || 'Unknown';
+        const baro_altitude = searchedFeature.properties.baro_altitude;
+        const geo_altitude = searchedFeature.properties.geo_altitude;
+        const velocity = searchedFeature.properties.velocity;
+        const on_ground = searchedFeature.properties.on_ground;
+        
+        const airline = getAirlineInfo(callsignStr);
+        const altitude_m = baro_altitude !== null && baro_altitude !== undefined 
+          ? baro_altitude 
+          : (geo_altitude !== null && geo_altitude !== undefined ? geo_altitude : 0);
+        const altitude_ft = Math.round(altitude_m * 3.28084);
+        const speed_kmh = velocity !== null && velocity !== undefined 
+          ? Math.round(velocity * 3.6) 
+          : 0;
+        
+        const statusText = on_ground ? '🛬 On Ground' : '✈️ In Flight';
+        const altitudeDisplay = on_ground 
+          ? 'Ground' 
+          : `${altitude_ft.toLocaleString()} ft (${Math.round(altitude_m)} m)`;
+        
+        new mapboxgl.Popup({
+          closeButton: true,
+          closeOnClick: true,
+          maxWidth: '350px'
+        })
+          .setLngLat([longitude, latitude])
+          .setHTML(`
+            <div style="min-width: 280px; padding: 5px;">
+              <h3 style="margin: 0 0 12px 0; color: #4a9eff; font-size: 20px; font-weight: bold; border-bottom: 2px solid #4a9eff; padding-bottom: 8px;">
+                ✈️ ${callsignStr}
+              </h3>
+              
+              <div style="background: rgba(74, 158, 255, 0.1); padding: 8px; border-radius: 5px; margin-bottom: 10px;">
+                <p style="margin: 3px 0; font-size: 14px; color: #4a9eff;">
+                  <strong>🏢 Airline:</strong> ${airline}
+                </p>
+              </div>
+              
+              <p style="margin: 8px 0; font-size: 14px;">
+                <strong>📍 Status:</strong> ${statusText}
+              </p>
+              
+              <p style="margin: 8px 0; font-size: 14px;">
+                <strong>📏 Altitude:</strong> ${altitudeDisplay}
+              </p>
+              
+              <p style="margin: 8px 0; font-size: 14px;">
+                <strong>⚡ Speed:</strong> ${speed_kmh} km/h
+              </p>
+              
+              <p style="margin: 8px 0; font-size: 14px;">
+                <strong>🌍 Country:</strong> ${origin_country}
+              </p>
+              
+              <hr style="border: none; border-top: 1px solid #333; margin: 10px 0;">
+              
+              <p style="margin: 5px 0; font-size: 11px; color: #888; font-style: italic;">
+                ⚠️ Route info requires paid API
+              </p>
+              
+              <p style="margin: 8px 0; font-size: 12px; color: #999;">
+                <strong>ICAO24:</strong> ${icao24}
+              </p>
+            </div>
+          `)
+          .addTo(map.current);
+      }, 2100);
+      
+      setSearchLoading(false);
+      console.log(`Found and displayed flight: ${callsign}`);
+      
+    } catch (error) {
+      console.error("Error searching flight:", error);
+      if (error.response?.status === 429) {
+        setSearchError('Rate limit exceeded. Please wait a moment and try again.');
+      } else {
+        setSearchError('Failed to search flight. Please try again.');
+      }
+      setSearchLoading(false);
+    }
+  }, []);
+
   return(
     <div>
         <div ref={mapContainer} className='map-container'/>
         
-        {/* Filter Box */}
-        <div className="filter-box">
-          <div className="filter-header">
-            <span className="filter-icon">🔍</span>
-            <span className="filter-title">Filter Flights</span>
+        {/* Unified Search & Filter Box */}
+        <div className="control-box">
+          <div className="control-header">
+            <span className="control-icon">✈️</span>
+            <span className="control-title">Flight Search & Filter</span>
           </div>
-          <input
-            type="text"
-            placeholder="Enter airline name or code (e.g., British Airways, BAW)"
-            value={filterText}
-            onChange={(e) => {
-              const value = e.target.value;
-              setFilterText(value);
-              applyFilter(value);
-            }}
-            className="filter-input"
-          />
-          {filterText && (
-            <button 
-              className="clear-filter-btn"
-              onClick={() => {
-                setFilterText('');
-                applyFilter('');
-              }}
-            >
-              ✕ Clear
-            </button>
-          )}
-          <div className="filter-examples">
-            <small>Quick filters:</small>
-            {[
-              {code: 'BAW', name: 'British Airways'}, 
-              {code: 'CCA', name: 'Air China'}, 
-              {code: 'AFL', name: 'Aeroflot'},
-              {code: 'Lufthansa', name: 'Lufthansa'},
-              {code: 'Emirates', name: 'Emirates'}
-            ].map(item => (
-              <button
-                key={item.code}
-                className="example-btn"
-                onClick={() => {
-                  setFilterText(item.code);
-                  applyFilter(item.code);
+          
+          {/* Search Specific Flight */}
+          <div className="control-section">
+            <div className="section-label">
+              <span className="label-icon">🔍</span>
+              <span>Search Flight by Number</span>
+            </div>
+            <div className="search-input-container">
+              <input
+                type="text"
+                placeholder="e.g., CCA123, BAW456, FDX39"
+                value={searchCallsign}
+                onChange={(e) => setSearchCallsign(e.target.value)}
+                onKeyPress={(e) => {
+                  if (e.key === 'Enter' && !searchLoading) {
+                    searchFlightByCallsign(searchCallsign);
+                  }
                 }}
-                title={item.name}
+                className="search-input"
+                disabled={searchLoading}
+              />
+              <button 
+                className="search-btn"
+                onClick={() => searchFlightByCallsign(searchCallsign)}
+                disabled={searchLoading || !searchCallsign.trim()}
               >
-                {item.code}
+                {searchLoading ? '🔄' : '🔍'}
               </button>
-            ))}
+            </div>
+            {searchError && (
+              <div className="error-message">
+                ⚠️ {searchError}
+              </div>
+            )}
+          </div>
+          
+          {/* Filter by Airline */}
+          <div className="control-section">
+            <div className="section-label">
+              <span className="label-icon">🏢</span>
+              <span>Filter by Airline</span>
+            </div>
+            <div className="filter-input-container">
+              <input
+                type="text"
+                placeholder="e.g., British Airways, BAW"
+                value={filterText}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setFilterText(value);
+                  applyFilter(value);
+                }}
+                className="search-input"
+              />
+              {filterText && (
+                <button 
+                  className="clear-btn"
+                  onClick={() => {
+                    setFilterText('');
+                    applyFilter('');
+                  }}
+                  title="Clear filter"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+            <div className="quick-filters">
+              {[
+                {code: 'BAW', name: 'British Airways'}, 
+                {code: 'CCA', name: 'Air China'}, 
+                {code: 'AFL', name: 'Aeroflot'},
+                {code: 'DLH', name: 'Lufthansa'},
+                {code: 'UAE', name: 'Emirates'},
+                {code: 'FDX', name: 'FedEx'}
+              ].map(item => (
+                <button
+                  key={item.code}
+                  className="quick-filter-btn"
+                  onClick={() => {
+                    setFilterText(item.code);
+                    applyFilter(item.code);
+                  }}
+                  title={item.name}
+                >
+                  {item.code}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
     </div>
